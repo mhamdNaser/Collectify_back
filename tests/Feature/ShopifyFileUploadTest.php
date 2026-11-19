@@ -1,6 +1,7 @@
 <?php
 
 use App\Modules\Catalog\Models\Product;
+use App\Modules\Catalog\Models\ProductMedia;
 use App\Modules\CMS\Models\File;
 use App\Modules\Stores\Models\Store;
 use App\Modules\User\Models\User;
@@ -32,6 +33,8 @@ beforeEach(function () {
         $m('Catalog', '2026_02_26_091530_create_products_table'),
         $m('CMS', '2026_03_31_091738_create_files_table'),
         $m('CMS', '2026_04_18_100000_widen_files_paths_for_shopify_files_sync'),
+        $m('Catalog', '2026_02_26_091538_create_product_variants_table'),
+        $m('Catalog', '2026_04_20_130400_create_advanced_commerce_catalog_tables'),
     ]]);
     Role::findOrCreate('partner', 'web');
     Storage::fake('public');
@@ -86,6 +89,7 @@ function fakeShopifyFileUpload(array $node): void
                 ]]],
                 str_contains($query, 'FileStatus') => ['data' => ['node' => $node]],
                 str_contains($query, 'fileUpdate') => ['data' => ['fileUpdate' => ['files' => [['id' => $node['id']]], 'userErrors' => []]]],
+                str_contains($query, 'ProductMediaStatus') => ['data' => ['product' => ['media' => ['nodes' => [['id' => $node['id'], 'status' => 'READY']]]]]],
                 default => ['data' => []],
             });
         },
@@ -182,4 +186,106 @@ it('rejects file types Shopify does not accept', function () {
         ->assertJsonValidationErrors('file');
 
     Http::assertNothingSent();
+});
+
+it('shows the linked image as the product cover right away', function () {
+    fakeShopifyFileUpload([
+        '__typename' => 'MediaImage',
+        'id' => 'gid://shopify/MediaImage/600',
+        'fileStatus' => 'READY',
+        'image' => ['url' => 'https://cdn.shopify.com/s/files/cap.png', 'width' => 10, 'height' => 10],
+    ]);
+    $product = Product::query()->create([
+        'store_id' => $this->store->id, 'title' => 'Cap', 'slug' => 'cap', 'handle' => 'cap',
+        'shopify_product_id' => 'gid://shopify/Product/80',
+    ]);
+
+    $this->actingAs($this->owner)->post('/api/admin/files/upload-to-shopify', [
+        'file' => fakePng('cap.png'), 'owner_type' => 'product', 'owner_id' => $product->id,
+    ], ['Accept' => 'application/json'])->assertCreated();
+
+    expect($product->fresh()->featured_image['url'])->toBe(File::query()->sole()->url);
+});
+
+/** A product with one image stored three ways, as the different Shopify syncs leave it. */
+function productWithImage($test): array
+{
+    $product = Product::query()->create([
+        'store_id' => $test->store->id, 'title' => 'Bag', 'slug' => 'bag', 'handle' => 'bag',
+        'shopify_product_id' => 'gid://shopify/Product/90',
+        'featured_image' => ['url' => 'https://cdn.shopify.com/s/files/bag.png?v=1'],
+    ]);
+    $uploaded = File::query()->create([
+        'store_id' => $test->store->id, 'disk' => 'public', 'path' => 'x/bag.png', 'url' => 'https://app.test/storage/x/bag.png',
+        'type' => 'image', 'role' => 'product_image', 'fileable_type' => Product::class, 'fileable_id' => $product->id,
+        'shopify_id' => 700, 'meta' => ['__typename' => 'MediaImage', 'source_url' => 'https://cdn.shopify.com/s/files/bag.png?v=1'],
+    ]);
+    $imported = File::query()->create([
+        'store_id' => $test->store->id, 'disk' => 'public', 'path' => 'bag', 'url' => 'https://cdn.shopify.com/s/files/bag.png?v=2',
+        'type' => 'image', 'role' => 'product_image', 'fileable_type' => Product::class, 'fileable_id' => $product->id,
+        'shopify_id' => 12345, 'meta' => [],
+    ]);
+    $media = ProductMedia::query()->create([
+        'store_id' => $test->store->id, 'product_id' => $product->id, 'shopify_media_id' => 'gid://shopify/MediaImage/700',
+        'url' => 'https://cdn.shopify.com/s/files/bag.png?v=3',
+    ]);
+
+    return [$product, $uploaded, $imported, $media];
+}
+
+function fakeShopifyDelete(array $errors = []): void
+{
+    Http::fake(['*/admin/api/*/graphql.json' => fn (Request $request) => Http::response(match (true) {
+        str_contains((string) $request['query'], 'fileDelete') => ['data' => ['fileDelete' => [
+            'deletedFileIds' => $errors ? [] : ['gid://shopify/MediaImage/700'], 'userErrors' => $errors,
+        ]]],
+        str_contains((string) $request['query'], 'ProductMedia(') => ['data' => ['product' => ['media' => ['nodes' => [
+            ['id' => 'gid://shopify/MediaImage/700', 'image' => ['url' => 'https://cdn.shopify.com/s/files/bag.png?v=9']],
+        ]]]]],
+        default => ['data' => []],
+    })]);
+}
+
+it('deletes an image in Shopify and every local copy of it', function () {
+    fakeShopifyDelete();
+    [$product, $uploaded, $imported, $media] = productWithImage($this);
+
+    $this->actingAs($this->owner)->deleteJson("/api/admin/files/{$uploaded->id}")->assertOk();
+
+    Http::assertSent(fn (Request $request) => str_contains((string) ($request->data()['query'] ?? ''), 'fileDelete')
+        && $request['variables'] === ['fileIds' => ['gid://shopify/MediaImage/700']]);
+    expect(File::query()->count())->toBe(0)
+        ->and(ProductMedia::query()->count())->toBe(0)
+        ->and($product->fresh()->featured_image)->toBeNull();
+});
+
+it('finds the Shopify media of an image imported from the product by its URL', function () {
+    fakeShopifyDelete();
+    [, , $imported] = productWithImage($this);
+
+    $this->actingAs($this->owner)->deleteJson("/api/admin/files/{$imported->id}")->assertOk();
+
+    Http::assertSent(fn (Request $request) => str_contains((string) ($request->data()['query'] ?? ''), 'fileDelete')
+        && $request['variables'] === ['fileIds' => ['gid://shopify/MediaImage/700']]);
+    expect(File::query()->count())->toBe(0);
+});
+
+it('deletes product media rows through their own endpoint', function () {
+    fakeShopifyDelete();
+    [, , , $media] = productWithImage($this);
+
+    $this->actingAs($this->owner)->deleteJson("/api/admin/product-media/{$media->id}")->assertOk();
+
+    expect(ProductMedia::query()->count())->toBe(0)
+        ->and(File::query()->count())->toBe(0);
+});
+
+it('keeps the image when Shopify refuses to delete it', function () {
+    fakeShopifyDelete([['field' => ['fileIds'], 'message' => 'File is in use by a theme', 'code' => 'FILE_LOCKED']]);
+    [, $uploaded] = productWithImage($this);
+
+    $this->actingAs($this->owner)->deleteJson("/api/admin/files/{$uploaded->id}")
+        ->assertStatus(422)->assertJsonValidationErrors('shopify');
+
+    expect(File::query()->count())->toBe(2)->and(ProductMedia::query()->count())->toBe(1);
 });

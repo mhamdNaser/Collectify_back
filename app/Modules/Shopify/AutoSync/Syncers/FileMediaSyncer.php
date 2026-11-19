@@ -6,13 +6,14 @@ use App\Modules\Catalog\Models\Collection;
 use App\Modules\Catalog\Models\Product;
 use App\Modules\Catalog\Models\ProductVariant;
 use App\Modules\CMS\Models\File;
+use App\Modules\Shopify\AutoSync\Exceptions\ShopifyUserErrorsException;
 use App\Modules\Shopify\AutoSync\Support\Gid;
 use App\Modules\Shopify\AutoSync\SyncContext;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Validation\ValidationException;
 
 /**
- * Links Shopify files (media library) to products, variants and collections.
+ * Links Shopify files (media library) to products, variants and collections, and deletes them.
  */
 class FileMediaSyncer
 {
@@ -24,6 +25,39 @@ class FileMediaSyncer
             $owner instanceof Product => $this->attachToProduct($file, $owner, $ctx),
             default => null,
         };
+    }
+
+    /**
+     * Deletes the file in Shopify, which also removes it from every product using it.
+     * Returns the deleted Shopify id, or null when the file was never in Shopify.
+     */
+    public function delete(File $file, SyncContext $ctx): ?string
+    {
+        $gid = $this->existingGid($file, $ctx);
+
+        if ($gid) {
+            $this->deleteGid($gid, $ctx);
+        }
+
+        return $gid;
+    }
+
+    public function deleteGid(string $gid, SyncContext $ctx): void
+    {
+        try {
+            $ctx->gw->mutate(<<<'GQL'
+mutation FileDelete($fileIds: [ID!]!) {
+  fileDelete(fileIds: $fileIds) {
+    deletedFileIds
+    userErrors { field message code }
+  }
+}
+GQL, ['fileIds' => [$gid]], 'fileDelete');
+        } catch (ShopifyUserErrorsException $e) {
+            if (!$e->isNotFound()) {
+                throw $e;
+            }
+        }
     }
 
     private function attachToProduct(File $file, Product $product, SyncContext $ctx): string
@@ -41,7 +75,33 @@ mutation FileLink($files: [FileUpdateInput!]!) {
 }
 GQL, ['files' => [['id' => $fileGid, 'referencesToAdd' => [$productGid]]]], 'fileUpdate');
 
+        $this->waitUntilOnProduct($productGid, $fileGid, $ctx);
+
         return $fileGid;
+    }
+
+    /**
+     * Linking is processed asynchronously by Shopify; until it is done the product has no
+     * featuredImage, so the read-back would show the product without its new image.
+     */
+    private function waitUntilOnProduct(string $productGid, string $fileGid, SyncContext $ctx, int $timeoutSeconds = 15): void
+    {
+        $deadline = microtime(true) + $timeoutSeconds;
+
+        do {
+            $nodes = $ctx->gw->query(
+                'query ProductMediaStatus($id: ID!) { product(id: $id) { media(first: 250) { nodes { id status } } } }',
+                ['id' => $productGid],
+            )['product']['media']['nodes'] ?? [];
+
+            foreach ($nodes as $node) {
+                if (($node['id'] ?? null) === $fileGid && in_array($node['status'] ?? null, ['READY', 'FAILED'], true)) {
+                    return;
+                }
+            }
+
+            usleep(1_000_000);
+        } while (microtime(true) < $deadline);
     }
 
     private function attachToVariant(File $file, ProductVariant $variant, SyncContext $ctx): void
@@ -92,8 +152,8 @@ GQL, ['input' => [
     {
         $meta = is_array($file->meta) ? $file->meta : [];
 
-        if (filled($file->shopify_id)) {
-            return Gid::make((string) $file->shopify_id, (string) ($meta['__typename'] ?? 'MediaImage'));
+        if ($gid = $this->existingGid($file, $ctx)) {
+            return $gid;
         }
 
         $source = $meta['source_url'] ?? $file->url;
@@ -122,6 +182,43 @@ GQL, ['files' => [[
         ])->saveQuietly();
 
         return (string) $created['id'];
+    }
+
+    /**
+     * The media id of a file already in Shopify. Library files know their type; images
+     * imported from product.images only have a ProductImage id, so they are matched by
+     * URL among the product's media.
+     */
+    private function existingGid(File $file, SyncContext $ctx): ?string
+    {
+        $meta = is_array($file->meta) ? $file->meta : [];
+
+        if (filled($file->shopify_id) && filled($meta['__typename'] ?? null)) {
+            return Gid::make((string) $file->shopify_id, (string) $meta['__typename']);
+        }
+
+        $owner = $file->fileable;
+        $product = $owner instanceof ProductVariant ? $owner->product : $owner;
+        $productGid = $product instanceof Product ? Gid::make($product->shopify_product_id, 'Product') : null;
+
+        if (!$productGid) {
+            return null;
+        }
+
+        $media = $ctx->gw->query(
+            'query ProductMedia($id: ID!) { product(id: $id) { media(first: 250) { nodes { id ... on MediaImage { image { url } } } } } }',
+            ['id' => $productGid],
+        )['product']['media']['nodes'] ?? [];
+
+        $paths = array_filter([strtok((string) $file->url, '?'), strtok((string) ($meta['source_url'] ?? ''), '?')]);
+
+        foreach ($media as $node) {
+            if (in_array(strtok((string) ($node['image']['url'] ?? ''), '?'), $paths, true)) {
+                return (string) $node['id'];
+            }
+        }
+
+        return null;
     }
 
     private function shopifyUrl(File $file): string

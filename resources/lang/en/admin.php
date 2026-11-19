@@ -1303,4 +1303,8 @@ return [
     'Failed to change email.' => 'Failed to change email.',
     'New password (leave empty to keep the current one)' => 'New password (leave empty to keep the current one)',
     'Password must be at least 8 characters' => 'Password must be at least 8 characters',
+    'Delete image' => 'Delete image',
+    'Delete this image from Shopify? It will be removed from every product that uses it.' => 'Delete this image from Shopify? It will be removed from every product that uses it.',
+    'File deleted successfully.' => 'File deleted successfully.',
+    'Failed to delete file.' => 'Failed to delete file.',
 ];

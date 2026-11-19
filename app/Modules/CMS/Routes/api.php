@@ -18,6 +18,8 @@ Route::prefix('admin')->group(function () {
         Route::post('files', [FileController::class, 'index']);
         Route::post('files/upload-to-shopify', [FileController::class, 'uploadToShopify']);
         Route::post('files/attach', [FileController::class, 'attach']);
+        Route::delete('files/{id}', [FileController::class, 'destroy']);
+        Route::delete('product-media/{id}', [FileController::class, 'destroyProductMedia']);
         Route::controller(ArticleController::class)->group(function () {
             Route::post('articles', 'index');
             Route::post('articles/store', 'store');

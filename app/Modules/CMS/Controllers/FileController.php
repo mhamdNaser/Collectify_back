@@ -5,6 +5,7 @@ namespace App\Modules\CMS\Controllers;
 use App\Http\Controllers\Controller;
 use App\Modules\Catalog\Models\Collection;
 use App\Modules\Catalog\Models\Product;
+use App\Modules\Catalog\Models\ProductMedia;
 use App\Modules\Catalog\Models\ProductVariant;
 use App\Modules\CMS\Models\File;
 use App\Modules\CMS\Requests\AttachFileRequest;
@@ -263,6 +264,127 @@ class FileController extends Controller
             $owner->image_alt = $file->altText ?: $owner->title;
             $owner->save();
         }
+
+        // Shopify sets featuredImage only after it processes the media, so the first image
+        // is shown as the cover right away instead of waiting for the next sync.
+        if ($owner instanceof Product && empty($owner->featured_image['url'] ?? null)) {
+            $owner->featured_image = ['url' => $file->url, 'altText' => $file->altText ?: $owner->title];
+            $owner->save();
+        }
+    }
+
+    /**
+     * Deletes the file in Shopify (it disappears from every product using it) and every
+     * local copy of it. Nothing is deleted locally if Shopify could not be reached.
+     */
+    public function destroy(int $id)
+    {
+        $file = File::query()->findOrFail($id);
+        $this->authorizeStoreAccess((string) $file->store_id);
+        $meta = is_array($file->meta) ? $file->meta : [];
+
+        $this->deleteEverywhere(
+            storeId: (string) $file->store_id,
+            product: $this->productOf($file->fileable),
+            urls: [$file->url, $meta['source_url'] ?? null],
+            deleteInShopify: function ($ctx) use ($file) {
+                return $this->fileMediaSyncer->delete($file, $ctx);
+            },
+            deleteLocal: fn () => $file->delete(),
+        );
+
+        return response()->json([
+            'message' => 'File deleted successfully.',
+            'meta' => ['shopify_sync' => $this->shopifySync->report()],
+        ]);
+    }
+
+    public function destroyProductMedia(int $id)
+    {
+        $media = ProductMedia::query()->findOrFail($id);
+        $this->authorizeStoreAccess((string) $media->store_id);
+
+        $this->deleteEverywhere(
+            storeId: (string) $media->store_id,
+            product: Product::query()->find($media->product_id),
+            urls: [$media->url],
+            deleteInShopify: function ($ctx) use ($media) {
+                if (blank($media->shopify_media_id)) {
+                    return null;
+                }
+
+                $this->fileMediaSyncer->deleteGid((string) $media->shopify_media_id, $ctx);
+
+                return (string) $media->shopify_media_id;
+            },
+            deleteLocal: fn () => $media->delete(),
+        );
+
+        return response()->json([
+            'message' => 'Media deleted successfully.',
+            'meta' => ['shopify_sync' => $this->shopifySync->report()],
+        ]);
+    }
+
+    /**
+     * @param array<int, ?string> $urls
+     */
+    private function deleteEverywhere(string $storeId, ?Product $product, array $urls, \Closure $deleteInShopify, \Closure $deleteLocal): void
+    {
+        // The same image can exist as a library file, a product image file and a product
+        // media row; match them by URL without the ?v= query string.
+        $paths = array_values(array_filter(array_map(fn ($url) => strtok((string) $url, '?') ?: null, $urls)));
+
+        DB::transaction(function () use ($storeId, $paths, $deleteInShopify, $deleteLocal) {
+            $deletedGid = null;
+            $this->shopifySync->run($storeId, function ($ctx) use ($deleteInShopify, &$deletedGid) {
+                $deletedGid = $deleteInShopify($ctx);
+            });
+
+            if (($this->shopifySync->report()['status'] ?? null) === 'failed') {
+                abort(503, 'Shopify could not be reached, so nothing was deleted. Try again.');
+            }
+
+            $deleteLocal();
+
+            ProductMedia::query()
+                ->where('store_id', $storeId)
+                ->where(function ($query) use ($deletedGid, $paths) {
+                    $query->when($deletedGid, fn ($q) => $q->orWhere('shopify_media_id', $deletedGid));
+                    foreach ($paths as $path) {
+                        $query->orWhere('url', 'like', $path . '%');
+                    }
+                })
+                ->delete();
+
+            if ($paths !== []) {
+                File::query()
+                    ->where('store_id', $storeId)
+                    ->where(function ($query) use ($paths) {
+                        foreach ($paths as $path) {
+                            $query->orWhere('url', 'like', $path . '%')
+                                ->orWhere('meta->source_url', 'like', $path . '%');
+                        }
+                    })
+                    ->delete();
+            }
+        });
+
+        if (!$product) {
+            return;
+        }
+
+        if (in_array(strtok((string) ($product->featured_image['url'] ?? ''), '?'), $paths, true)) {
+            $product->featured_image = null;
+            $product->save();
+        }
+
+        $this->shopifySync->refreshFromShopify($product);
+    }
+
+    private function productOf(?Model $owner): ?Product
+    {
+        return $owner instanceof ProductVariant ? $owner->product : ($owner instanceof Product ? $owner : null);
     }
 
     private function resolveOwner(string $ownerType, int $ownerId): Model

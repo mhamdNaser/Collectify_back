@@ -1303,4 +1303,8 @@ return [
     'Failed to change email.' => 'فشل تغيير البريد الإلكتروني.',
     'New password (leave empty to keep the current one)' => 'كلمة سر جديدة (اتركها فارغة للإبقاء على الحالية)',
     'Password must be at least 8 characters' => 'يجب أن تتكون كلمة السر من 8 أحرف على الأقل',
+    'Delete image' => 'حذف الصورة',
+    'Delete this image from Shopify? It will be removed from every product that uses it.' => 'هل تريد حذف هذه الصورة من شوبيفاي؟ ستُحذف من كل المنتجات التي تستخدمها.',
+    'File deleted successfully.' => 'تم حذف الملف بنجاح.',
+    'Failed to delete file.' => 'فشل حذف الملف.',
 ];

@@ -27,6 +27,8 @@ use App\Modules\Shopify\Exceptions\ShopifySyncException;
 use App\Modules\Shopify\OutboundSync\DTOs\EnqueueOutboundSyncData;
 use App\Modules\Shopify\OutboundSync\Jobs\ProcessOutboundSyncJob;
 use App\Modules\Shopify\OutboundSync\Services\OutboundSyncManager;
+use App\Modules\Shopify\Webhooks\Jobs\SyncSingleCollectionJob;
+use App\Modules\Shopify\Webhooks\Jobs\SyncSingleProductJob;
 use App\Modules\Stores\Models\Store;
 use App\Modules\User\Models\Customer;
 use Closure;
@@ -36,6 +38,7 @@ use Illuminate\Http\Client\RequestException;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Validation\ValidationException;
+use Throwable;
 
 /**
  * Pushes every dashboard create/update/delete to Shopify inside the same request.
@@ -84,12 +87,16 @@ class ShopifyAutoSync
      */
     public function create(Closure $persist): Model
     {
-        return DB::transaction(function () use ($persist) {
+        $model = DB::transaction(function () use ($persist) {
             $model = $persist();
             $this->push($model, 'create', [], []);
 
             return $model;
         });
+
+        $this->refreshFromShopify($model);
+
+        return $model;
     }
 
     /**
@@ -100,13 +107,17 @@ class ShopifyAutoSync
      */
     public function update(Model $current, array $changed, Closure $persist): Model
     {
-        return DB::transaction(function () use ($current, $changed, $persist) {
+        $model = DB::transaction(function () use ($current, $changed, $persist) {
             $before = $this->syncerFor($current)?->snapshot($current) ?? [];
             $model = $persist();
             $this->push($model, 'update', $before, array_values($changed));
 
             return $model;
         });
+
+        $this->refreshFromShopify($model);
+
+        return $model;
     }
 
     public function delete(Model $current, Closure $persist): void
@@ -127,6 +138,43 @@ class ShopifyAutoSync
     public function run(?string $storeId, Closure $push): void
     {
         $this->execute($storeId, $push, null);
+    }
+
+    /**
+     * After a successful push, reads the record back from Shopify (with its variants,
+     * images, inventory...) so the dashboard shows exactly what Shopify stored.
+     * A failed read-back is only reported: the push itself already succeeded.
+     */
+    public function refreshFromShopify(Model $model): void
+    {
+        if (($this->report['status'] ?? null) !== 'synced') {
+            return;
+        }
+
+        [$job, $shopifyId] = match (true) {
+            $model instanceof Product => [SyncSingleProductJob::class, $model->shopify_product_id],
+            $model instanceof ProductVariant => [SyncSingleProductJob::class, $model->product()->value('shopify_product_id')],
+            $model instanceof Collection => [SyncSingleCollectionJob::class, $model->shopify_collection_id],
+            default => [null, null],
+        };
+
+        if (!$job || blank($shopifyId)) {
+            return;
+        }
+
+        // The product job queues its variant/image/inventory jobs; run them now instead.
+        $connection = config('queue.default');
+        config(['queue.default' => 'sync']);
+
+        try {
+            $job::dispatchSync((string) $model->getAttribute('store_id'), (string) $shopifyId);
+            $model->refresh();
+        } catch (Throwable $e) {
+            Log::warning('Shopify auto-sync: read-back failed', ['model' => $model::class, 'id' => $model->getKey(), 'error' => $e->getMessage()]);
+            $this->report['notes'][] = 'Saved in Shopify, but reading it back failed (' . $e->getMessage() . '); it will refresh on the next sync.';
+        } finally {
+            config(['queue.default' => $connection]);
+        }
     }
 
     /**

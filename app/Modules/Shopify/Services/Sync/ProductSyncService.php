@@ -84,7 +84,7 @@ class ProductSyncService
                 'seo_title' => $productData->seoTitle,
                 'seo_description' => $productData->seoDescription,
                 'slug' => Str::slug($productData->title),
-                'status' => $productData->status,
+                'status' => strtolower((string) $productData->status),
                 'tags' => $productData->tags,
                 'featured_image' => $productData->featuredImage,
                 'published_at' => $productData->publishedAt,

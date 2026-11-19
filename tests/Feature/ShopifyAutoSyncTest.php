@@ -30,6 +30,17 @@ beforeEach(function () {
         $m('Catalog', '2026_02_26_091740_create_collection_products_table'),
         $m('Catalog', '2026_02_26_091520_create_options_table'),
         $m('Catalog', '2026_03_31_091008_create_product_options_table'),
+        $m('Catalog', '2026_03_31_091712_create_tags_table'),
+        $m('Catalog', '2026_03_31_091723_create_taggables_table'),
+        $m('Catalog', '2026_02_26_091521_create_option_values_table'),
+        $m('Catalog', '2026_02_26_091538_create_product_variants_table'),
+        $m('Catalog', '2026_03_31_091024_create_variant_option_values_table'),
+        $m('CMS', '2026_03_31_091738_create_files_table'),
+        $m('CMS', '2026_04_18_100000_widen_files_paths_for_shopify_files_sync'),
+        $m('CMS', '2026_03_31_091039_create_metafields_table'),
+        $m('Inventory', '2026_02_27_135717_create_locations_table'),
+        $m('Inventory', '2026_02_27_135719_create_inventories_table'),
+        $m('Inventory', '2026_03_25_141614_create_inventory_levels_table'),
         $m('Shopify', '2026_04_25_170000_create_shopify_outbound_syncs_table'),
         $m('Shopify', '2026_04_25_170100_create_shopify_outbound_sync_attempts_table'),
     ]]);
@@ -244,4 +255,34 @@ it('finishes a queued push once Shopify is reachable again', function () {
 
     expect($collection->fresh()->shopify_collection_id)->toBe('gid://shopify/Collection/202')
         ->and(DB::table('shopify_outbound_syncs')->value('status'))->toBe('synced');
+});
+
+it('reads the product back from Shopify after saving it', function () {
+    fakeShopifyGraphql([
+        'productCreate' => ['data' => ['productCreate' => [
+            'product' => ['id' => 'gid://shopify/Product/300', 'handle' => 'red-shirt-1'],
+            'userErrors' => [],
+        ]]],
+        'GetProduct' => ['data' => ['product' => [
+            'id' => 'gid://shopify/Product/300',
+            'title' => 'Red Shirt',
+            'handle' => 'red-shirt-1',
+            'status' => 'DRAFT',
+            'vendor' => '',
+            'productType' => '',
+            'tags' => [],
+            'options' => [],
+        ]]],
+    ]);
+
+    $sync = app(ShopifyAutoSync::class);
+    $product = $sync->create(fn () => Product::query()->create([
+        'store_id' => $this->store->id, 'title' => 'Red Shirt', 'slug' => 'red-shirt', 'handle' => 'red-shirt',
+        'status' => 'draft',
+    ]));
+
+    expect(sentShopifyQueries('GetProduct'))->not->toBeEmpty()
+        ->and($product->handle)->toBe('red-shirt-1')
+        ->and($product->shopify_product_id)->toBe('gid://shopify/Product/300')
+        ->and(Product::query()->count())->toBe(1);
 });

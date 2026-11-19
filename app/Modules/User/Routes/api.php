@@ -16,6 +16,8 @@ Route::prefix('admin')->group(function () {
 
     Route::middleware('auth:sanctum')->get('/me', [AuthController::class, 'me']);
     Route::middleware('auth:sanctum')->post('/password/change', [AuthController::class, 'changePassword']);
+    Route::middleware(['auth:sanctum', 'throttle:5,1'])->post('/account/send-code', [AuthController::class, 'sendAccountCode']);
+    Route::middleware('auth:sanctum')->post('/account/email', [AuthController::class, 'changeEmail']);
 
     Route::controller(AuthController::class)->group(function () {
         Route::post('adminregister', 'register')->middleware('throttle:10,1')->name('adminregister');

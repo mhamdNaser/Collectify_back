@@ -125,11 +125,13 @@ GRAPHQL;
                 if ($data->shopifyImageId) {
                     $query->where('shopify_id', $data->shopifyImageId)
                         ->orWhere('url', $data->url);
-
-                    return;
+                } else {
+                    $query->where('url', $data->url);
                 }
 
-                $query->where('url', $data->url);
+                // Files uploaded from the dashboard keep the Shopify CDN URL here (their own
+                // url is the local cache), so match on it to avoid a duplicate image row.
+                $query->orWhere('meta->source_url', 'like', strtok((string) $data->url, '?') . '%');
             })
             ->firstOrNew([
                 'fileable_type' => get_class($model),

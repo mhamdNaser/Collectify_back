@@ -10,7 +10,14 @@ use App\Modules\User\Requests\User\ChangePasswordRequest;
 use App\Modules\User\Requests\User\ForgotPasswordRequest;
 use App\Modules\User\Requests\User\ResetPasswordWithCodeRequest;
 use App\Modules\User\Repositories\Interfaces\UserRepositoryInterface;
+use App\Modules\User\Mail\VerificationCodeMail;
 use Illuminate\Http\Request;
+use Illuminate\Support\Carbon;
+use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\Mail;
+use Illuminate\Validation\Rule;
+use Illuminate\Validation\ValidationException;
+use Laravel\Sanctum\PersonalAccessToken;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
@@ -144,26 +151,137 @@ class AuthController extends Controller
         return new UserResource($request->user());
     }
 
+    /**
+     * No current password needed. Super admins change it directly; everyone else
+     * confirms with the code sent to their email (sendAccountCode, purpose=password).
+     */
     public function changePassword(ChangePasswordRequest $request)
     {
         $user = $request->user();
         $validated = $request->validated();
 
-        if (!Hash::check($validated['current_password'], $user->password)) {
-            return response()->json([
-                'message' => 'Current password is incorrect.',
-                'errors' => [
-                    'current_password' => ['Current password is incorrect.'],
-                ],
-            ], 422);
+        if (!$user->hasRole('admin')) {
+            $this->consumeAccountCode($user, 'password', (string) ($validated['code'] ?? ''));
         }
 
         $user->password = $validated['new_password'];
         $user->save();
 
+        // Sign out every other session; keep the one that made the change.
+        $current = $user->currentAccessToken();
+        $user->tokens()
+            ->when($current instanceof PersonalAccessToken, fn ($query) => $query->whereKeyNot($current->getKey()))
+            ->delete();
+
         return response()->json([
             'message' => 'Password changed successfully.',
         ]);
+    }
+
+    /**
+     * Sends a 6-digit code: to the current email (purpose=password) or to the new
+     * email (purpose=email) so the owner proves they control it.
+     */
+    public function sendAccountCode(Request $request)
+    {
+        $user = $request->user();
+        $validated = $request->validate([
+            'purpose' => ['required', Rule::in(['password', 'email'])],
+            'email' => [
+                Rule::requiredIf($request->input('purpose') === 'email'),
+                'nullable', 'email', 'max:255',
+                Rule::unique('users', 'email')->ignore($user->id),
+            ],
+        ]);
+
+        $purpose = $validated['purpose'];
+        $sendTo = $purpose === 'email' ? strtolower((string) $validated['email']) : (string) $user->email;
+        $code = (string) random_int(100000, 999999);
+
+        try {
+            Mail::to($sendTo)->send(new VerificationCodeMail($code, $purpose));
+        } catch (\Throwable $e) {
+            report($e);
+
+            return response()->json(['message' => 'Could not send the verification email. Try again later.'], 503);
+        }
+
+        Cache::put($this->accountCodeKey($user, $purpose), [
+            'hash' => Hash::make($code),
+            'email' => $purpose === 'email' ? $sendTo : null,
+            'attempts' => 0,
+            'expires_at' => now()->addMinutes(15)->getTimestamp(),
+        ], now()->addMinutes(15));
+
+        return response()->json([
+            'message' => 'Verification code sent to ' . $sendTo . '.',
+            'dev_code' => app()->environment('production') ? null : $code,
+        ]);
+    }
+
+    /**
+     * Super admins change their email directly; everyone else needs the code that
+     * was sent to the new address.
+     */
+    public function changeEmail(Request $request)
+    {
+        $user = $request->user();
+        $isAdmin = $user->hasRole('admin');
+        $validated = $request->validate([
+            'email' => ['required', 'email', 'max:255', Rule::unique('users', 'email')->ignore($user->id)],
+            'code' => [Rule::requiredIf(!$isAdmin), 'nullable', 'digits:6'],
+        ]);
+        $email = strtolower((string) $validated['email']);
+
+        if (!$isAdmin) {
+            $entry = $this->consumeAccountCode($user, 'email', (string) $validated['code']);
+
+            if ($entry['email'] !== $email) {
+                throw ValidationException::withMessages(['email' => 'This is not the email the code was sent to.']);
+            }
+        }
+
+        $user->email = $email;
+        $user->save();
+
+        return response()->json([
+            'message' => 'Email changed successfully.',
+            'data' => new UserResource($user->fresh()),
+        ]);
+    }
+
+    private function accountCodeKey(User $user, string $purpose): string
+    {
+        return "account-code:{$user->id}:{$purpose}";
+    }
+
+    /**
+     * Checks and burns the code. 5 wrong tries invalidate it.
+     *
+     * @return array{hash: string, email: ?string, attempts: int, expires_at: int}
+     */
+    private function consumeAccountCode(User $user, string $purpose, string $code): array
+    {
+        $key = $this->accountCodeKey($user, $purpose);
+        $entry = Cache::get($key);
+
+        if (!is_array($entry)) {
+            throw ValidationException::withMessages(['code' => 'The code has expired or was not requested. Send a new code.']);
+        }
+
+        if (!Hash::check($code, $entry['hash'])) {
+            $entry['attempts']++;
+
+            $entry['attempts'] >= 5
+                ? Cache::forget($key)
+                : Cache::put($key, $entry, Carbon::createFromTimestamp($entry['expires_at']));
+
+            throw ValidationException::withMessages(['code' => 'Invalid verification code.']);
+        }
+
+        Cache::forget($key);
+
+        return $entry;
     }
 
     public function forgotPassword(ForgotPasswordRequest $request)
@@ -188,7 +306,12 @@ class AuthController extends Controller
             ]
         );
 
-        // TODO: integrate Mail/SMS sender here.
+        try {
+            Mail::to($email)->send(new VerificationCodeMail($code));
+        } catch (\Throwable $e) {
+            report($e);
+        }
+
         return response()->json([
             'message' => 'Verification code generated successfully.',
             'dev_code' => app()->environment('production') ? null : $code,
@@ -208,7 +331,8 @@ class AuthController extends Controller
             ], 422);
         }
 
-        if (now()->diffInMinutes($record->created_at) > 15) {
+        // Carbon 3 returns a signed diff, so measure from created_at forwards.
+        if (Carbon::parse($record->created_at)->diffInMinutes(now()) > 15) {
             DB::table('password_reset_tokens')->where('email', $email)->delete();
             return response()->json([
                 'message' => 'Verification code expired.',

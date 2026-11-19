@@ -236,15 +236,17 @@ class FileController extends Controller
 
         $this->authorizeStoreAccess($ownerStoreId);
 
-        return DB::transaction(function () use ($file, $owner, $ownerType, $role) {
+        DB::transaction(function () use ($file, $owner, $ownerType, $role) {
             $this->linkFileLocally($file, $owner, $ownerType, $role);
             $this->shopifySync->run(
                 (string) $owner->store_id,
                 fn ($ctx) => $this->fileMediaSyncer->attach($file, $owner, $ctx),
             );
-
-            return $file->fresh();
         });
+
+        $this->shopifySync->refreshFromShopify($owner);
+
+        return $file->fresh() ?? $file;
     }
 
     private function linkFileLocally(File $file, Model $owner, string $ownerType, ?string $role): void

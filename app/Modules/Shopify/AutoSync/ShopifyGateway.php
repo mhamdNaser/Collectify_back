@@ -108,11 +108,12 @@ GQL;
             'input' => [
                 'name' => 'available',
                 'reason' => 'correction',
-                'ignoreCompareQuantity' => true,
                 'quantities' => [[
                     'inventoryItemId' => $inventoryItemId,
                     'locationId' => $locationId,
                     'quantity' => $quantity,
+                    // 2026-04: mandatory field; null skips the compare-and-swap check (set the value as-is).
+                    'changeFromQuantity' => null,
                 ]],
             ],
             'idempotencyKey' => (string) Str::uuid(),

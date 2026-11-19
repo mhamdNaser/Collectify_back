@@ -37,9 +37,16 @@ class ProductSyncPipeline
         $this->metafields->handle($store, $persisted);
         $this->collections->handle($store, $persisted);
 
+        // The jobs read these snake_case keys; returning Shopify's camelCase pageInfo made
+        // every import stop after the first page.
         return [
             'products' => $persisted,
-            'page_info' => $raw['pageInfo'],
+            'fetched_count' => count($raw['edges']),
+            'synced_count' => count($persisted),
+            'page_info' => [
+                'has_next_page' => (bool) ($raw['pageInfo']['hasNextPage'] ?? false),
+                'end_cursor' => $raw['pageInfo']['endCursor'] ?? null,
+            ],
         ];
     }
 }

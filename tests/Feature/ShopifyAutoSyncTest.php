@@ -286,3 +286,18 @@ it('reads the product back from Shopify after saving it', function () {
         ->and($product->shopify_product_id)->toBe('gid://shopify/Product/300')
         ->and(Product::query()->count())->toBe(1);
 });
+
+it('sets inventory with the 2026-04 input (changeFromQuantity null, no ignoreCompareQuantity)', function () {
+    fakeShopifyGraphql([
+        'inventorySetQuantities' => ['data' => ['inventorySetQuantities' => ['userErrors' => []]]],
+    ]);
+
+    (new \App\Modules\Shopify\AutoSync\ShopifyGateway($this->store))
+        ->setAvailableQuantity('gid://shopify/InventoryItem/1', 'gid://shopify/Location/2', 7);
+
+    $input = sentShopifyQueries('inventorySetQuantities')[0]['variables']['input'];
+    expect($input)->not->toHaveKey('ignoreCompareQuantity')
+        ->and($input['quantities'][0])->toHaveKey('changeFromQuantity')
+        ->and($input['quantities'][0]['changeFromQuantity'])->toBeNull()
+        ->and($input['quantities'][0]['quantity'])->toBe(7);
+});

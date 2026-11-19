@@ -19,16 +19,17 @@ class CategorySyncService
             return null;
         }
 
-        $category = Category::updateOrCreate(
-            [
-                'store_id' => $store->id,
-                'shopify_category_id' => $categoryId,
-            ],
-            [
-                'name' => $categoryName,
-                'slug' => Str::slug($categoryName ?? ''),
-            ]
-        );
+        // categories are unique per store by name, so fall back to a same-name row
+        // (e.g. created from the dashboard) instead of inserting a duplicate.
+        $category = Category::query()->where('store_id', $store->id)->where('shopify_category_id', $categoryId)->first()
+            ?? Category::query()->where('store_id', $store->id)->where('name', $categoryName)->first()
+            ?? new Category(['store_id' => $store->id]);
+
+        $category->fill([
+            'shopify_category_id' => $categoryId,
+            'name' => $categoryName,
+            'slug' => Str::slug($categoryName ?? ''),
+        ])->save();
 
         return $category->id;
     }

@@ -13,6 +13,8 @@ class ShopifyClient
 {
     private const API_VERSION = '2026-04';
 
+    private const THROTTLE_RETRIES = 6;
+
     public function __construct(
         private readonly Store $store
     ) {
@@ -38,38 +40,70 @@ class ShopifyClient
             $payload['variables'] = $variables;
         }
 
-        try {
-            $response = $this->request()->post($url, $payload);
-        } catch (\Throwable $e) {
-            throw new ShopifySyncException(
-                message: 'Failed to connect to Shopify GraphQL API: ' . $e->getMessage(),
-                code: 0,
-                previous: $e,
-                context: [
-                    'store_id' => $this->store->id,
-                    'url' => $url,
-                ]
-            );
-        }
+        for ($attempt = 1; ; $attempt++) {
+            try {
+                $response = $this->request()->post($url, $payload);
+            } catch (\Throwable $e) {
+                throw new ShopifySyncException(
+                    message: 'Failed to connect to Shopify GraphQL API: ' . $e->getMessage(),
+                    code: 0,
+                    previous: $e,
+                    context: [
+                        'store_id' => $this->store->id,
+                        'url' => $url,
+                    ]
+                );
+            }
 
-        $this->ensureSuccessfulHttpResponse($response, $url, $payload);
+            $this->ensureSuccessfulHttpResponse($response, $url, $payload);
 
-        $json = $response->json();
+            $json = $response->json();
 
-        if (!is_array($json)) {
-            throw new ShopifySyncException(
-                message: 'Invalid JSON response returned from Shopify GraphQL API.',
-                context: [
-                    'store_id' => $this->store->id,
-                    'url' => $url,
-                    'response_body' => $response->body(),
-                ]
-            );
+            if (!is_array($json)) {
+                throw new ShopifySyncException(
+                    message: 'Invalid JSON response returned from Shopify GraphQL API.',
+                    context: [
+                        'store_id' => $this->store->id,
+                        'url' => $url,
+                        'response_body' => $response->body(),
+                    ]
+                );
+            }
+
+            $wait = $this->throttleWaitSeconds($json);
+
+            if ($wait === null || $attempt >= self::THROTTLE_RETRIES) {
+                break;
+            }
+
+            sleep($wait);
         }
 
         $this->ensureNoGraphqlErrors($json, $url, $payload);
 
         return $json;
+    }
+
+    /**
+     * Shopify answers THROTTLED (HTTP 200) when the query-cost bucket is empty, e.g. while
+     * an import's follow-up jobs use it up. Returns how long to wait for enough points,
+     * or null when the response is not throttled.
+     */
+    private function throttleWaitSeconds(array $json): ?int
+    {
+        $throttled = collect($json['errors'] ?? [])
+            ->contains(fn ($error) => ($error['extensions']['code'] ?? null) === 'THROTTLED');
+
+        if (!$throttled) {
+            return null;
+        }
+
+        $cost = $json['extensions']['cost'] ?? [];
+        $status = $cost['throttleStatus'] ?? [];
+        $missing = (float) ($cost['requestedQueryCost'] ?? 0) - (float) ($status['currentlyAvailable'] ?? 0);
+        $restoreRate = max(1.0, (float) ($status['restoreRate'] ?? 50));
+
+        return (int) min(20, max(1, ceil($missing / $restoreRate)));
     }
 
     /**

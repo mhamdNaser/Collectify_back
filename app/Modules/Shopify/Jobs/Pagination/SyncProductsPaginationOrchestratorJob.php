@@ -17,7 +17,10 @@ class SyncProductsPaginationOrchestratorJob implements ShouldQueue
 {
     use Batchable, Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
-    public int $tries = 3;
+    public int $tries = 4;
+
+    /** Each page queues the next one, so one failed page stops the whole import: retry it spaced out. */
+    public array $backoff = [15, 60, 120];
     public int $timeout = 300;
 
     public function __construct(

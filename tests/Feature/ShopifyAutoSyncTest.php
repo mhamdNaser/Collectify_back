@@ -301,3 +301,27 @@ it('sets inventory with the 2026-04 input (changeFromQuantity null, no ignoreCom
         ->and($input['quantities'][0]['changeFromQuantity'])->toBeNull()
         ->and($input['quantities'][0]['quantity'])->toBe(7);
 });
+
+it('waits and retries when Shopify answers THROTTLED instead of failing', function () {
+    Http::fake(['*/admin/api/*/graphql.json' => Http::sequence()
+        ->push([
+            'errors' => [['message' => 'Throttled', 'extensions' => ['code' => 'THROTTLED']]],
+            'extensions' => ['cost' => ['requestedQueryCost' => 60, 'throttleStatus' => ['currentlyAvailable' => 10, 'restoreRate' => 100]]],
+        ])
+        ->push(['data' => ['shop' => ['id' => 'gid://shopify/Shop/1']]])]);
+
+    $response = (new \App\Modules\Shopify\Services\ShopifyClient($this->store))->query('query { shop { id } }');
+
+    expect($response['data']['shop']['id'])->toBe('gid://shopify/Shop/1');
+    Http::assertSentCount(2);
+});
+
+it('reuses a same-name category instead of breaking the product import', function () {
+    \App\Modules\Catalog\Models\Category::query()->create(['store_id' => $this->store->id, 'name' => 'Lipsticks', 'slug' => 'lipsticks']);
+
+    $id = app(\App\Modules\Shopify\Services\Sync\CategorySyncService::class)
+        ->sync($this->store, 'gid://shopify/TaxonomyCategory/hb-3-2-7', 'Lipsticks');
+
+    expect(\App\Modules\Catalog\Models\Category::query()->count())->toBe(1)
+        ->and(\App\Modules\Catalog\Models\Category::query()->find($id)->shopify_category_id)->toBe('gid://shopify/TaxonomyCategory/hb-3-2-7');
+});

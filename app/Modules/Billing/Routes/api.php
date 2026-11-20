@@ -34,7 +34,9 @@ Route::prefix('admin')->group(function () {
         Route::controller(PlanController::class)->group(function () {
             Route::post('allPlans', 'index');
             Route::get('plans/{id}', 'show');
+            Route::post('plans', 'store');
             Route::put('plans/{id}', 'update');
+            Route::delete('plans/{id}', 'destroy');
             Route::patch('plans/{id}/status', 'changeStatus');
         });
 

@@ -17,6 +17,9 @@ return Application::configure(basePath: dirname(__DIR__))
             'permission' => \Spatie\Permission\Middleware\PermissionMiddleware::class,
             'role_or_permission' => \Spatie\Permission\Middleware\RoleOrPermissionMiddleware::class,
         ]);
+
+        // Store staff: enforce the roles their store owner gave them on every API call.
+        $middleware->appendToGroup('api', \App\Modules\User\Team\EnforceStorePermissions::class);
     })
     ->withExceptions(function (Exceptions $exceptions): void {
         //

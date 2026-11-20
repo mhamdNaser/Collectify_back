@@ -2,6 +2,7 @@
 
 namespace App\Modules\User\Resources;
 
+use App\Modules\User\Team\StorePermissions;
 use Illuminate\Http\Resources\Json\JsonResource;
 
 class UserResource extends JsonResource
@@ -27,6 +28,10 @@ class UserResource extends JsonResource
             'has_store' => $this->hasStore(),
             'roles' => $this->getRoleNames(), // ترجع كل الأدوار كـ array
             'permissions' => $this->getAllPermissions()->pluck('name'), // كل الصلاحيات
+            // Store team: staff see only what their store roles grant (owners get every key).
+            'is_store_staff' => $this->isStoreStaff(),
+            'store_permissions' => $this->storePermissions(),
+            'store_hidden_fields' => $this->isStoreStaff() ? StorePermissions::hiddenFieldsBySection($this->storePermissions()) : (object) [],
             'created_at' => $this->created_at?->toDateTimeString(),
             'country' => [
                 'id'    => $this->country?->id,

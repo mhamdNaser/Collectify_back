@@ -58,7 +58,8 @@ class StoreConnector
 
         $store = DB::transaction(function () use ($owner, $existing, $shop, $token, $input) {
             $attributes = [
-                'owner_id' => $owner->id,
+                // A staff member may update the connection, but the store stays its owner's.
+                'owner_id' => $existing?->owner_id ?? $owner->id,
                 'shopify_store_id' => $shop['id'],
                 'shopify_domain' => $shop['domain'],
                 'shopify_access_token' => Crypt::encryptString((string) $token),

@@ -23,7 +23,7 @@ class FulfillmentsSyncService
 {
     private const PAGE_SIZE = 50;
 
-    public function sync(Store $store): void
+    public function sync(Store $store): int
     {
         $client = new ShopifyClient($store);
 
@@ -37,6 +37,8 @@ class FulfillmentsSyncService
                     $this->syncOrderFulfillmentData($store, $client, $order);
                 }
             });
+
+        return Fulfillment::query()->where('store_id', $store->id)->count();
     }
 
     private function syncFulfillmentServices(Store $store, ShopifyClient $client): void

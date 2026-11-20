@@ -8,7 +8,7 @@ use Illuminate\Support\Facades\DB;
 
 class SyncMonitorRepository implements SyncMonitorRepositoryInterface
 {
-    private const TYPES = ['runs', 'status', 'errors', 'meta'];
+    private const TYPES = ['runs', 'status', 'errors'];
 
     public function allowedTypes(): array
     {

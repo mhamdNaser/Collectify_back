@@ -33,13 +33,14 @@ class SyncFulfillmentsJob implements ShouldQueue
             : null;
 
         try {
-            $service->sync(Store::findOrFail($this->storeId));
+            $count = $service->sync(Store::findOrFail($this->storeId));
 
             if ($syncJobId) {
                 $tracker->markJobCompleted($syncJobId);
             }
 
             if ($this->syncRunId) {
+                $tracker->incrementRunCounts($this->syncRunId, fetched: $count, synced: $count);
                 $tracker->markRunCompleted($this->syncRunId, $this->storeId, 'fulfillments');
             }
         } catch (Throwable $e) {

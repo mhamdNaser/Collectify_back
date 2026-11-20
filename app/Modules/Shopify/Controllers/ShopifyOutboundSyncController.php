@@ -28,6 +28,15 @@ class ShopifyOutboundSyncController extends Controller
             ->when($request->filled('status'), fn ($q) => $q->where('status', (string) $request->string('status')))
             ->when($request->filled('entity_type'), fn ($q) => $q->where('entity_type', (string) $request->string('entity_type')))
             ->when($request->filled('action'), fn ($q) => $q->where('action', (string) $request->string('action')))
+            ->when($request->filled('search'), function ($q) use ($request) {
+                $search = (string) $request->string('search');
+                $q->where(fn ($q) => $q->where('entity_type', 'like', "%{$search}%")
+                    ->orWhere('entity_id', $search)
+                    ->orWhere('action', 'like', "%{$search}%")
+                    ->orWhere('status', 'like', "%{$search}%")
+                    ->orWhere('last_error_message', 'like', "%{$search}%")
+                    ->orWhere('shopify_resource_id', 'like', "%{$search}%"));
+            })
             ->orderBy('id', 'desc');
 
         $paginated = $query->paginate($perPage);

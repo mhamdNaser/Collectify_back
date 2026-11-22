@@ -124,9 +124,11 @@ it('uploads an image to Shopify and waits until it has a URL', function () {
         ->and($file->type)->toBe('image')
         ->and($file->size)->toBeGreaterThan(0)
         ->and($file->meta['source_url'])->toBe('https://cdn.shopify.com/s/files/shirt.png')
-        ->and($file->url)->not->toBeEmpty();
+        // Shown straight from Shopify's CDN; a local copy 404'd on the host.
+        ->and($file->url)->toBe('https://cdn.shopify.com/s/files/shirt.png')
+        ->and($file->disk)->toBe('shopify');
 
-    Storage::disk('public')->assertExists($file->path);
+    expect(Storage::disk('public')->allFiles())->toBe([]);
 });
 
 it('links an uploaded image to the product in Shopify', function () {

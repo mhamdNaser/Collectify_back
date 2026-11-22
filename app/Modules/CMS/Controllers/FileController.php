@@ -23,10 +23,7 @@ use App\Modules\Shopify\Support\ShopifyHelper;
 use App\Modules\Stores\Models\Store;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Facades\DB;
-use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
-use Illuminate\Support\Facades\Storage;
-use Illuminate\Support\Str;
 use Illuminate\Validation\ValidationException;
 
 class FileController extends Controller
@@ -152,10 +149,6 @@ class FileController extends Controller
         $alt = data_get($shopifyFile, 'alt');
         $shopifyGid = (string) ($shopifyFile['id'] ?? '');
         $shopifyId = ShopifyHelper::extractId($shopifyGid);
-        $localAsset = $this->cacheShopifyAssetLocally($store, $sourceUrl, $mimeType, $role ?: 'global_file');
-        $storageUrl = $localAsset['url'] ?? $sourceUrl;
-        $disk = $localAsset['disk'] ?? 'shopify';
-        $path = $localAsset['path'] ?? $sourceUrl;
 
         return File::query()->updateOrCreate(
             [
@@ -163,9 +156,11 @@ class FileController extends Controller
                 'shopify_id' => $shopifyId ? (int) $shopifyId : null,
             ],
             [
-                'disk' => $disk,
-                'path' => $path,
-                'url' => $storageUrl,
+                // Served from Shopify's CDN like every synced file; a local copy needed a
+                // public storage link the host does not have, so the gallery showed a 404.
+                'disk' => 'shopify',
+                'path' => $sourceUrl,
+                'url' => $sourceUrl,
                 'mime_type' => $mimeType,
                 'size' => $size,
                 'type' => $this->typeFromMimeAndTypename($mimeType, $shopifyFile['__typename'] ?? null),
@@ -178,59 +173,9 @@ class FileController extends Controller
                 'fileable_id' => null,
                 'meta' => array_merge($shopifyFile, [
                     'source_url' => $sourceUrl,
-                    'cached_locally' => (bool) ($localAsset['cached'] ?? false),
                 ]),
             ],
         );
-    }
-
-    private function cacheShopifyAssetLocally(Store $store, ?string $sourceUrl, ?string $mimeType, string $role): array
-    {
-        if (!$sourceUrl) {
-            return ['cached' => false];
-        }
-
-        try {
-            $response = Http::timeout(30)->retry(2, 300)->get($sourceUrl);
-            if (!$response->successful()) {
-                return ['cached' => false];
-            }
-
-            $extension = $this->detectExtension($sourceUrl, $mimeType);
-            $fileName = Str::uuid()->toString() . '.' . $extension;
-            $path = "shopify-cache/{$store->id}/{$role}/{$fileName}";
-
-            Storage::disk('public')->put($path, $response->body());
-
-            return [
-                'cached' => true,
-                'disk' => 'public',
-                'path' => $path,
-                'url' => Storage::disk('public')->url($path),
-            ];
-        } catch (\Throwable) {
-            return ['cached' => false];
-        }
-    }
-
-    private function detectExtension(?string $sourceUrl, ?string $mimeType): string
-    {
-        $extFromUrl = strtolower((string) pathinfo((string) parse_url((string) $sourceUrl, PHP_URL_PATH), PATHINFO_EXTENSION));
-        if ($extFromUrl !== '') {
-            return $extFromUrl;
-        }
-
-        $mime = strtolower((string) $mimeType);
-
-        return match (true) {
-            str_contains($mime, 'jpeg') => 'jpg',
-            str_contains($mime, 'png') => 'png',
-            str_contains($mime, 'webp') => 'webp',
-            str_contains($mime, 'gif') => 'gif',
-            str_contains($mime, 'svg') => 'svg',
-            str_contains($mime, 'mp4') => 'mp4',
-            default => 'bin',
-        };
     }
 
     private function attachFileToOwner(File $file, string $ownerType, int $ownerId, ?string $role = null): File

@@ -89,6 +89,11 @@ function fakeShopifyFileUpload(array $node, string $mediaStatus = 'READY'): void
                 ]]],
                 str_contains($query, 'FileStatus') => ['data' => ['node' => $node]],
                 str_contains($query, 'fileUpdate') => ['data' => ['fileUpdate' => ['files' => [['id' => $node['id']]], 'userErrors' => []]]],
+                // The product's images as Shopify lists them once the media is READY.
+                str_contains($query, 'GetProductImages') => ['data' => ['product' => ['images' => [
+                    'edges' => [['cursor' => 'c1', 'node' => ['id' => 'gid://shopify/ProductImage/900', 'url' => ($node['image']['url'] ?? 'https://cdn.shopify.com/x.png') . '?v=1']]],
+                    'pageInfo' => ['hasNextPage' => false, 'endCursor' => 'c1'],
+                ]]]],
                 str_contains($query, 'ProductMediaStatus') => ['data' => ['product' => ['media' => ['nodes' => [['id' => $node['id'], 'status' => $mediaStatus, 'mediaErrors' => $mediaStatus === 'FAILED' ? [['message' => 'Image is too large']] : []]]]]]],
                 default => ['data' => []],
             });
@@ -200,6 +205,9 @@ it('returns a readable error when Shopify cannot process the file', function () 
         ->assertJsonPath('errors.file.0', 'Shopify upload failed: Image format is not supported');
 
     expect(File::query()->count())->toBe(0);
+    // Not added here, so not left behind in Shopify either.
+    Http::assertSent(fn (Request $request) => str_contains((string) ($request->data()['query'] ?? ''), 'fileDelete')
+        && $request['variables']['fileIds'] === ['gid://shopify/MediaImage/557']);
 });
 
 it('rejects file types Shopify does not accept', function () {
@@ -358,4 +366,62 @@ it('leaves product images alone when Shopify answers without the image list', fu
         ->syncByProduct($this->store, $product, 'gid://shopify/Product/91');
 
     expect(File::query()->where('fileable_id', $product->id)->count())->toBe(1);
+});
+
+it('stores the new product image right away from the Shopify answer, exactly once', function () {
+    fakeShopifyFileUpload([
+        '__typename' => 'MediaImage',
+        'id' => 'gid://shopify/MediaImage/558',
+        'fileStatus' => 'READY',
+        'image' => ['url' => 'https://cdn.shopify.com/s/files/scarf.png', 'width' => 10, 'height' => 10],
+    ]);
+
+    $product = Product::query()->create([
+        'store_id' => $this->store->id, 'title' => 'Scarf', 'slug' => 'scarf', 'handle' => 'scarf',
+        'shopify_product_id' => 'gid://shopify/Product/79',
+    ]);
+
+    $this->actingAs($this->owner)
+        ->post('/api/admin/files/upload-to-shopify', [
+            'file' => fakePng('scarf.png'),
+            'owner_type' => 'product',
+            'owner_id' => $product->id,
+            'role' => 'product_image',
+        ], ['Accept' => 'application/json'])
+        ->assertCreated();
+
+    $images = File::query()->where('fileable_type', Product::class)->where('fileable_id', $product->id)->get();
+    expect($images)->toHaveCount(1)
+        ->and((string) $images[0]->shopify_id)->toBe('900')
+        ->and($images[0]->url)->toBe('https://cdn.shopify.com/s/files/scarf.png?v=1');
+
+    // Only the images were re-read, not the whole product (variants, inventory, metafields...).
+    Http::assertNotSent(fn (Request $request) => str_contains((string) ($request->data()['query'] ?? ''), 'query GetProduct('));
+});
+
+it('shows an image uploaded to the gallery without a product right away, first in the list', function () {
+    fakeShopifyFileUpload([
+        '__typename' => 'MediaImage',
+        'id' => 'gid://shopify/MediaImage/700',
+        'fileStatus' => 'READY',
+        'image' => ['url' => 'https://cdn.shopify.com/s/files/banner.png', 'width' => 1200, 'height' => 400],
+    ]);
+    File::query()->create([
+        'store_id' => $this->store->id, 'disk' => 'shopify', 'type' => 'image', 'role' => 'global_file',
+        'path' => 'https://cdn.shopify.com/old.png', 'url' => 'https://cdn.shopify.com/old.png', 'created_at' => now()->subDay(),
+    ]);
+
+    $this->actingAs($this->owner)
+        ->post('/api/admin/files/upload-to-shopify', ['file' => fakePng('banner.png'), 'title' => 'banner'], ['Accept' => 'application/json'])
+        ->assertCreated()
+        ->assertJsonPath('data.fileable_id', null);
+
+    $list = $this->actingAs($this->owner)
+        ->postJson('/api/admin/files', ['rowsPerPage' => 15, 'page' => 1, 'sort_by' => 'created_at', 'sort_direction' => 'desc'])
+        ->assertOk()
+        ->json('data');
+
+    expect($list)->toHaveCount(2)
+        ->and((int) $list[0]['width'])->toBe(1200)
+        ->and($list[0]['url'])->not->toBeEmpty();
 });

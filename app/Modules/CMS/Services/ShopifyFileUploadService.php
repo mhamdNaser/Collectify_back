@@ -11,7 +11,7 @@ use Illuminate\Support\Facades\Http;
 class ShopifyFileUploadService
 {
     /** Shopify processes new files asynchronously; wait this long for the CDN URL. */
-    private const READY_TIMEOUT_SECONDS = 25;
+    private const READY_TIMEOUT_SECONDS = 60;
 
     public function upload(Store $store, UploadedFile $file, ?string $title = null): array
     {
@@ -48,6 +48,7 @@ class ShopifyFileUploadService
 
             if ($status === 'FAILED') {
                 $message = collect($node['fileErrors'] ?? [])->pluck('message')->filter()->implode(' | ');
+                $this->discard($client, $id);
                 throw new \RuntimeException($message ?: 'Shopify could not process this file.');
             }
 
@@ -58,8 +59,26 @@ class ShopifyFileUploadService
             usleep(1_000_000);
         }
 
-        // Not READY in time: report it instead of saving a file Shopify has not confirmed.
-        throw new \RuntimeException('Shopify has not finished processing this file yet. Please try again in a moment.');
+        // Not READY in time: remove it so the file is in neither Shopify nor the dashboard,
+        // instead of showing up in Shopify while the dashboard reported a failure.
+        $this->discard($client, $id);
+        throw new \RuntimeException('Shopify did not finish processing this file in time, so it was not added. Please try again.');
+    }
+
+    private function discard(ShopifyClient $client, string $id): void
+    {
+        if ($id === '') {
+            return;
+        }
+
+        try {
+            $client->query(
+                'mutation FileDelete($fileIds: [ID!]!) { fileDelete(fileIds: $fileIds) { deletedFileIds userErrors { message } } }',
+                ['fileIds' => [$id]],
+            );
+        } catch (\Throwable $e) {
+            report($e); // the error shown to the user is the processing failure, not this cleanup
+        }
     }
 
     private function createStagedUploadTarget(ShopifyClient $client, UploadedFile $file): array

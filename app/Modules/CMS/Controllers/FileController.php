@@ -17,11 +17,14 @@ use App\Modules\CMS\Services\ShopifyFileUploadService;
 use App\Modules\Shopify\AutoSync\ShopifyAutoSync;
 use App\Modules\Shopify\AutoSync\Syncers\FileMediaSyncer;
 use App\Modules\Shopify\Exceptions\ShopifySyncException;
+use App\Modules\Shopify\Services\Sync\ImageProductSyncService;
+use App\Modules\Shopify\Services\Sync\ImageVariantSyncService;
 use App\Modules\Shopify\Support\ShopifyHelper;
 use App\Modules\Stores\Models\Store;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 use Illuminate\Validation\ValidationException;
@@ -75,6 +78,8 @@ class FileController extends Controller
 
     public function uploadToShopify(UploadShopifyFileRequest $request)
     {
+        // Waiting for Shopify to process the file can outlast the default 30s PHP limit.
+        set_time_limit(150);
         $validated = $request->validated();
         $store = $this->resolveStore($validated['store_id'] ?? null);
 
@@ -118,6 +123,7 @@ class FileController extends Controller
 
     public function attach(AttachFileRequest $request)
     {
+        set_time_limit(90); // waits for Shopify to finish adding the image to the product
         $validated = $request->validated();
 
         $file = File::query()->findOrFail((int) $validated['file_id']);
@@ -245,9 +251,49 @@ class FileController extends Controller
             );
         });
 
-        $this->shopifySync->refreshFromShopify($owner);
+        $localUrl = $file->url;
+        $this->readBackImages($owner);
+        $fresh = $file->fresh();
 
-        return $file->fresh() ?? $file;
+        // The cover was set from the local copy; follow the image to the URL Shopify gave it.
+        $product = $owner instanceof ProductVariant ? $owner->product : $owner;
+        if ($product instanceof Product && $fresh && $fresh->url !== $localUrl
+            && ($product->fresh()->featured_image['url'] ?? null) === $localUrl) {
+            $product->forceFill(['featured_image' => ['url' => $fresh->url, 'altText' => $fresh->altText ?: $product->title]])->save();
+        }
+
+        return $fresh ?? $file;
+    }
+
+    /**
+     * Re-reads only the images Shopify now holds for the owner. A full product read-back
+     * (variants, inventory, metafields...) made the request slow enough to be cut off
+     * after Shopify had saved the image, so the dashboard never stored it.
+     */
+    private function readBackImages(Model $owner): void
+    {
+        $product = $owner instanceof ProductVariant ? $owner->product : $owner;
+
+        if (!$product instanceof Product) {
+            $this->shopifySync->refreshFromShopify($owner);
+            return;
+        }
+
+        if (($this->shopifySync->report()['status'] ?? null) !== 'synced' || blank($product->shopify_product_id)) {
+            return;
+        }
+
+        try {
+            $store = Store::query()->findOrFail($product->store_id);
+            app(ImageProductSyncService::class)->syncByProduct($store, $product, (string) $product->shopify_product_id);
+
+            if ($owner instanceof ProductVariant && filled($owner->shopify_variant_id)) {
+                app(ImageVariantSyncService::class)->syncByVariant($store, $owner, (string) $owner->shopify_variant_id);
+            }
+        } catch (\Throwable $e) {
+            // The image is saved in Shopify and linked here; only the refresh failed.
+            Log::warning('Image read-back failed', ['product_id' => $product->id, 'error' => $e->getMessage()]);
+        }
     }
 
     private function linkFileLocally(File $file, Model $owner, string $ownerType, ?string $role): void

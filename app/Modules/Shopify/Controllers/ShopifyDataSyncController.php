@@ -3,6 +3,7 @@
 namespace App\Modules\Shopify\Controllers;
 
 use App\Http\Controllers\Controller;
+use App\Modules\Shopify\Actions\ResetStoreShopifyDataAction;
 use App\Modules\Shopify\Jobs\Pagination\SyncProductsPaginationOrchestratorJob;
 use App\Modules\Shopify\Jobs\SyncContentJob;
 use App\Modules\Shopify\Jobs\SyncCustomersJob;
@@ -36,6 +37,7 @@ class ShopifyDataSyncController extends Controller
 {
     public function __construct(
         private readonly SyncRunTracker $tracker,
+        private readonly ResetStoreShopifyDataAction $resetStoreData,
     ) {}
 
     public function files(Request $request): JsonResponse
@@ -218,6 +220,13 @@ class ShopifyDataSyncController extends Controller
             ], 422);
         }
 
+        // A full import starts from a clean copy so it ends up exactly matching Shopify.
+        $cleared = [];
+        if ($preset === 'full_commerce') {
+            $this->resetStoreData->ensureShopifyReachable($store);
+            $cleared = array_filter($this->resetStoreData->execute($store));
+        }
+
         $runs = [];
         foreach ($ordered as $type) {
             $runs[] = $this->dispatchType((string) $store->id, $type, $perPage);
@@ -232,6 +241,7 @@ class ShopifyDataSyncController extends Controller
                 'requested_types' => $selectedSet,
                 'ordered_types' => $ordered,
                 'invalid_types' => $invalid,
+                'cleared_rows' => $cleared,
                 'sync_runs' => $runs,
             ],
         ], 202);

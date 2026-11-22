@@ -1400,4 +1400,7 @@ return [
     'Plan deleted.' => 'Plan deleted.',
     'Saved.' => 'Saved.',
     'Deleted.' => 'Deleted.',
+    'Re-import from Shopify?' => 'Re-import from Shopify?',
+    'Images, media, orders\' details, discounts, content and the rest of the copied data will be cleared and imported again from Shopify, so they match it exactly. Products, customers and orders stay.' => 'Images, media, orders\' details, discounts, content and the rest of the copied data will be cleared and imported again from Shopify, so they match it exactly. Products, customers and orders stay.',
+    'Clear and re-import' => 'Clear and re-import',
 ];

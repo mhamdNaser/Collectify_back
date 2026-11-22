@@ -1400,4 +1400,7 @@ return [
     'Plan deleted.' => 'تم حذف الخطة.',
     'Saved.' => 'تم الحفظ.',
     'Deleted.' => 'تم الحذف.',
+    'Re-import from Shopify?' => 'إعادة الاستيراد من Shopify؟',
+    'Images, media, orders\' details, discounts, content and the rest of the copied data will be cleared and imported again from Shopify, so they match it exactly. Products, customers and orders stay.' => 'ستُحذف الصور والوسائط وتفاصيل الطلبات والخصومات والمحتوى وباقي البيانات المنسوخة، ثم تُستورد من جديد من Shopify لتطابقه تماماً. المنتجات والعملاء والطلبات تبقى كما هي.',
+    'Clear and re-import' => 'حذف وإعادة الاستيراد',
 ];

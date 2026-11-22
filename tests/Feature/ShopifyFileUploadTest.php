@@ -316,3 +316,46 @@ it('keeps the image when Shopify refuses to delete it', function () {
 
     expect(File::query()->count())->toBe(2)->and(ProductMedia::query()->count())->toBe(1);
 });
+
+it('keeps exactly the product images Shopify has, dropping duplicates and removed ones', function () {
+    $product = Product::query()->create([
+        'store_id' => $this->store->id, 'title' => 'Mug', 'slug' => 'mug', 'handle' => 'mug',
+        'shopify_product_id' => 'gid://shopify/Product/90',
+    ]);
+    $row = fn (string $url, ?string $id) => File::query()->create([
+        'store_id' => $this->store->id, 'disk' => 'public', 'type' => 'image', 'role' => 'product_image',
+        'path' => $url, 'url' => $url, 'shopify_id' => $id,
+        'fileable_type' => Product::class, 'fileable_id' => $product->id,
+    ]);
+    $row('https://cdn.shopify.com/mug.png', '1');
+    $row('https://cdn.shopify.com/mug.png', '1');       // duplicate copy
+    $row('https://cdn.shopify.com/old.png', '2');       // removed in Shopify
+
+    Http::fake(['*/admin/api/*/graphql.json' => Http::response(['data' => ['product' => ['images' => [
+        'edges' => [['cursor' => 'a', 'node' => ['id' => 'gid://shopify/ProductImage/1', 'url' => 'https://cdn.shopify.com/mug.png']]],
+        'pageInfo' => ['hasNextPage' => false, 'endCursor' => 'a'],
+    ]]]])]);
+
+    app(\App\Modules\Shopify\Services\Sync\ImageProductSyncService::class)
+        ->syncByProduct($this->store, $product, 'gid://shopify/Product/90');
+
+    expect(File::query()->where('fileable_id', $product->id)->pluck('url')->all())->toBe(['https://cdn.shopify.com/mug.png']);
+});
+
+it('leaves product images alone when Shopify answers without the image list', function () {
+    $product = Product::query()->create([
+        'store_id' => $this->store->id, 'title' => 'Bag', 'slug' => 'bag', 'handle' => 'bag',
+        'shopify_product_id' => 'gid://shopify/Product/91',
+    ]);
+    File::query()->create([
+        'store_id' => $this->store->id, 'disk' => 'public', 'type' => 'image', 'role' => 'product_image',
+        'path' => 'https://cdn.shopify.com/bag.png', 'url' => 'https://cdn.shopify.com/bag.png',
+        'fileable_type' => Product::class, 'fileable_id' => $product->id,
+    ]);
+    Http::fake(['*/admin/api/*/graphql.json' => Http::response(['data' => ['product' => null]])]);
+
+    app(\App\Modules\Shopify\Services\Sync\ImageProductSyncService::class)
+        ->syncByProduct($this->store, $product, 'gid://shopify/Product/91');
+
+    expect(File::query()->where('fileable_id', $product->id)->count())->toBe(1);
+});

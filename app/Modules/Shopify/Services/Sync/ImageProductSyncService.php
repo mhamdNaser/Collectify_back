@@ -20,13 +20,18 @@ class ImageProductSyncService
     {
         $images = $this->fetchImages($store, $shopifyProductId);
 
+        // A partial answer must not be mistaken for "these are all the images".
+        if ($images === null) {
+            return;
+        }
+
         $this->syncImages($store, $product, $images);
     }
 
     /**
      * Fetch images from Shopify
      */
-    private function fetchImages(Store $store, string $shopifyProductId): array
+    private function fetchImages(Store $store, string $shopifyProductId): ?array
     {
         $client = new ShopifyClient($store);
         $images = [];
@@ -45,7 +50,7 @@ class ImageProductSyncService
             $connection = $response['data']['product']['images'] ?? null;
 
             if (!is_array($connection)) {
-                break;
+                return null;
             }
 
             $images = array_merge($images, $connection['edges'] ?? []);
@@ -87,6 +92,8 @@ GRAPHQL;
      */
     private function syncImages(Store $store, Product $product, array $images): void
     {
+        $keep = [];
+
         foreach ($images as $index => $image) {
 
             $image = $this->normalize($image['node'] ?? null);
@@ -95,8 +102,17 @@ GRAPHQL;
                 continue;
             }
 
-            $this->upsertFile($store, $product, $image, 'product_image', $index + 1);
+            $keep[] = $this->upsertFile($store, $product, $image, 'product_image', $index + 1)->id;
         }
+
+        // Shopify's list is complete here: any other image row of this product is a
+        // duplicate or was removed in Shopify, so drop it to stay identical to Shopify.
+        File::query()
+            ->where('fileable_type', $product::class)
+            ->where('fileable_id', $product->id)
+            ->where('role', 'product_image')
+            ->whereNotIn('id', $keep)
+            ->delete();
     }
 
     private function normalize(mixed $image): ?ImageData

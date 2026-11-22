@@ -339,11 +339,7 @@ class FileController extends Controller
             $deletedGid = null;
             $this->shopifySync->run($storeId, function ($ctx) use ($deleteInShopify, &$deletedGid) {
                 $deletedGid = $deleteInShopify($ctx);
-            });
-
-            if (($this->shopifySync->report()['status'] ?? null) === 'failed') {
-                abort(503, 'Shopify could not be reached, so nothing was deleted. Try again.');
-            }
+            }); // aborts with 503 when Shopify cannot be reached, so nothing is deleted locally
 
             $deleteLocal();
 

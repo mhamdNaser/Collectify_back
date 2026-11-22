@@ -45,8 +45,8 @@ use Throwable;
  *
  * - Local change + Shopify call run in one DB transaction: if Shopify rejects the data
  *   (userErrors / GraphQL errors) the local change is rolled back and a 422 is returned.
- * - If Shopify is unreachable (timeout, 429, 5xx) the local change is kept and the push
- *   is queued in shopify_outbound_syncs to be retried automatically.
+ * - If Shopify is unreachable (timeout, 429, 5xx) the local change is rolled back and a 503
+ *   is returned: nothing is reported as saved until Shopify confirms it.
  */
 class ShopifyAutoSync
 {
@@ -130,14 +130,14 @@ class ShopifyAutoSync
     }
 
     /**
-     * Runs an ad-hoc Shopify push (e.g. attaching media). Shopify data errors still
-     * abort with 422; connectivity errors are reported but not retried.
+     * Runs an ad-hoc Shopify push (e.g. attaching media). Shopify data errors abort with
+     * 422 and connectivity errors with 503, so the caller's transaction rolls back.
      *
      * @param Closure(SyncContext): void $push
      */
     public function run(?string $storeId, Closure $push): void
     {
-        $this->execute($storeId, $push, null);
+        $this->execute($storeId, $push);
     }
 
     /**
@@ -262,15 +262,13 @@ class ShopifyAutoSync
                     'delete' => $syncer->delete($before, $ctx),
                 };
             },
-            fn () => $this->queue((string) $model->getAttribute('store_id'), $model, $action, $before, $changed),
         );
     }
 
     /**
      * @param Closure(SyncContext): void $push
-     * @param (Closure(): int)|null $queue
      */
-    private function execute(?string $storeId, Closure $push, ?Closure $queue): void
+    private function execute(?string $storeId, Closure $push): void
     {
         $gateway = $this->gatewayFor($storeId);
 
@@ -293,18 +291,9 @@ class ShopifyAutoSync
 
             Log::warning('Shopify auto-sync: Shopify unreachable', ['store_id' => $storeId, 'error' => $e->getMessage()]);
 
-            if ($queue) {
-                $outboundSyncId = $queue();
-                $this->report = [
-                    'status' => 'queued',
-                    'message' => 'Shopify is temporarily unreachable; the change was saved and will be pushed automatically.',
-                    'outbound_sync_id' => $outboundSyncId,
-                    'notes' => $ctx->notes(),
-                ];
-                return;
-            }
-
-            $this->report = ['status' => 'failed', 'message' => $e->getMessage(), 'notes' => $ctx->notes()];
+            // The dashboard only reports what Shopify confirmed: abort so the caller's
+            // transaction rolls the local change back instead of saving it unconfirmed.
+            abort(503, 'Shopify could not be reached, so nothing was saved. Please try again.');
         }
     }
 

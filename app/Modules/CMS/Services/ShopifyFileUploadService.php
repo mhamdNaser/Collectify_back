@@ -58,7 +58,8 @@ class ShopifyFileUploadService
             usleep(1_000_000);
         }
 
-        return $file;
+        // Not READY in time: report it instead of saving a file Shopify has not confirmed.
+        throw new \RuntimeException('Shopify has not finished processing this file yet. Please try again in a moment.');
     }
 
     private function createStagedUploadTarget(ShopifyClient $client, UploadedFile $file): array

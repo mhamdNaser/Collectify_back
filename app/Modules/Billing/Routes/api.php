@@ -12,19 +12,16 @@ Route::prefix('admin')->group(function () {
         Route::controller(PaymentTransactionController::class)->group(function () {
             Route::post('allPaymentTransactions', 'index');
             Route::get('payment-transactions/{id}', 'show');
-            Route::put('payment-transactions/{id}', 'update');
         });
 
         Route::controller(RefundController::class)->group(function () {
             Route::post('allRefunds', 'index');
             Route::get('refunds/{id}', 'show');
-            Route::put('refunds/{id}', 'update');
         });
 
         Route::controller(RefundItemController::class)->group(function () {
             Route::post('allRefundItems', 'index');
             Route::get('refund-items/{id}', 'show');
-            Route::put('refund-items/{id}', 'update');
         });
     });
 

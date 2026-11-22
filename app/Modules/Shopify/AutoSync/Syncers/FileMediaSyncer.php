@@ -81,27 +81,39 @@ GQL, ['files' => [['id' => $fileGid, 'referencesToAdd' => [$productGid]]]], 'fil
     }
 
     /**
-     * Linking is processed asynchronously by Shopify; until it is done the product has no
-     * featuredImage, so the read-back would show the product without its new image.
+     * Linking is processed asynchronously by Shopify. The image only counts as added once
+     * Shopify reports it READY on the product; a failure or no answer in time is an error,
+     * so the caller's transaction rolls the local link back.
      */
-    private function waitUntilOnProduct(string $productGid, string $fileGid, SyncContext $ctx, int $timeoutSeconds = 15): void
+    private function waitUntilOnProduct(string $productGid, string $fileGid, SyncContext $ctx, int $timeoutSeconds = 30): void
     {
         $deadline = microtime(true) + $timeoutSeconds;
 
         do {
             $nodes = $ctx->gw->query(
-                'query ProductMediaStatus($id: ID!) { product(id: $id) { media(first: 250) { nodes { id status } } } }',
+                'query ProductMediaStatus($id: ID!) { product(id: $id) { media(first: 250) { nodes { id status mediaErrors { message } } } } }',
                 ['id' => $productGid],
             )['product']['media']['nodes'] ?? [];
 
             foreach ($nodes as $node) {
-                if (($node['id'] ?? null) === $fileGid && in_array($node['status'] ?? null, ['READY', 'FAILED'], true)) {
+                if (($node['id'] ?? null) !== $fileGid) {
+                    continue;
+                }
+
+                if (($node['status'] ?? null) === 'READY') {
                     return;
+                }
+
+                if (($node['status'] ?? null) === 'FAILED') {
+                    $reason = collect($node['mediaErrors'] ?? [])->pluck('message')->filter()->implode(' | ');
+                    throw ValidationException::withMessages(['shopify' => 'Shopify could not add this image to the product' . ($reason ? ": {$reason}" : '.')]);
                 }
             }
 
             usleep(1_000_000);
         } while (microtime(true) < $deadline);
+
+        throw ValidationException::withMessages(['shopify' => 'Shopify has not confirmed the image yet, so it was not added. Please try again in a moment.']);
     }
 
     private function attachToVariant(File $file, ProductVariant $variant, SyncContext $ctx): void

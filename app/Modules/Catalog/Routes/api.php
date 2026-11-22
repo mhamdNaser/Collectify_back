@@ -72,11 +72,9 @@ Route::prefix('admin')->group(function () {
         });
 
         Route::controller(CategoriesController::class)->group(function () {
+            // Read-only: Shopify's standard product taxonomy cannot be changed through the API.
             Route::post('allCategories', 'index');
-            Route::post('categories', 'store');
             Route::get('categories/{id}', 'show');
-            Route::put('categories/{id}', 'update');
-            Route::delete('categories/{id}', 'destroy');
         });
 
         Route::controller(TagsController::class)->group(function () {

@@ -14,6 +14,7 @@ use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Queue;
 use Illuminate\Support\Str;
 use Illuminate\Validation\ValidationException;
+use Symfony\Component\HttpKernel\Exception\HttpException;
 
 // The full migration set is MySQL-only, so load just the tables this flow touches.
 beforeEach(function () {
@@ -133,25 +134,18 @@ it('rolls the local record back when Shopify rejects the data', function () {
     expect(Collection::query()->count())->toBe(0);
 });
 
-it('keeps the change and queues a retry when Shopify is unreachable', function () {
+it('saves nothing and reports an error when Shopify is unreachable', function () {
     Queue::fake();
     Http::fake(['*' => Http::response('Service unavailable', 503)]);
 
-    $sync = app(ShopifyAutoSync::class);
-    $collection = $sync->create(fn () => Collection::query()->create([
+    expect(fn () => app(ShopifyAutoSync::class)->create(fn () => Collection::query()->create([
         'store_id' => $this->store->id,
         'title' => 'Later',
-    ]));
+    ])))->toThrow(HttpException::class, 'Shopify could not be reached');
 
-    expect(Collection::query()->find($collection->id))->not->toBeNull()
-        ->and($sync->report()['status'])->toBe('queued');
-
-    $row = DB::table('shopify_outbound_syncs')->first();
-    expect($row->entity_type)->toBe('Collection')
-        ->and($row->action)->toBe('create')
-        ->and(json_decode($row->payload, true)['auto_sync']['id'])->toBe($collection->id);
-
-    Queue::assertPushed(ProcessOutboundSyncJob::class);
+    expect(Collection::query()->count())->toBe(0)
+        ->and(DB::table('shopify_outbound_syncs')->count())->toBe(0);
+    Queue::assertNotPushed(ProcessOutboundSyncJob::class);
 });
 
 it('re-pushes linked products when a vendor is renamed', function () {
@@ -232,18 +226,17 @@ it('only saves locally when the store is not connected to Shopify', function () 
     Http::assertNothingSent();
 });
 
-it('finishes a queued push once Shopify is reachable again', function () {
+// Bulk re-pushes (e.g. many products after a vendor rename) still go through the queue.
+it('finishes a queued push through the outbound worker', function () {
     Queue::fake();
-    Http::fake(['*' => Http::response('Service unavailable', 503)]);
 
-    $collection = app(ShopifyAutoSync::class)->create(fn () => Collection::query()->create([
+    $collection = Collection::query()->create([
         'store_id' => $this->store->id,
         'title' => 'Retry me',
         'is_active' => false,
-    ]));
-    $outboundId = (int) DB::table('shopify_outbound_syncs')->value('id');
+    ]);
+    $outboundId = app(ShopifyAutoSync::class)->queue($this->store->id, $collection, 'create', [], []);
 
-    Http::swap(new \Illuminate\Http\Client\Factory());
     fakeShopifyGraphql([
         'collectionCreate' => ['data' => ['collectionCreate' => [
             'collection' => ['id' => 'gid://shopify/Collection/202', 'handle' => 'retry-me'],

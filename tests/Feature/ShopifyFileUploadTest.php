@@ -65,12 +65,12 @@ function fakePng(string $name): UploadedFile
 /**
  * @param array<string, mixed> $node the file as Shopify returns it once processed
  */
-function fakeShopifyFileUpload(array $node): void
+function fakeShopifyFileUpload(array $node, string $mediaStatus = 'READY'): void
 {
     Http::fake([
         'staged.example.com/*' => Http::response('', 201),
         'cdn.shopify.com/*' => Http::response('fake-image-bytes', 200, ['Content-Type' => 'image/png']),
-        '*/admin/api/*/graphql.json' => function (Request $request) use ($node) {
+        '*/admin/api/*/graphql.json' => function (Request $request) use ($node, $mediaStatus) {
             $query = (string) $request['query'];
 
             return Http::response(match (true) {
@@ -89,7 +89,7 @@ function fakeShopifyFileUpload(array $node): void
                 ]]],
                 str_contains($query, 'FileStatus') => ['data' => ['node' => $node]],
                 str_contains($query, 'fileUpdate') => ['data' => ['fileUpdate' => ['files' => [['id' => $node['id']]], 'userErrors' => []]]],
-                str_contains($query, 'ProductMediaStatus') => ['data' => ['product' => ['media' => ['nodes' => [['id' => $node['id'], 'status' => 'READY']]]]]],
+                str_contains($query, 'ProductMediaStatus') => ['data' => ['product' => ['media' => ['nodes' => [['id' => $node['id'], 'status' => $mediaStatus, 'mediaErrors' => $mediaStatus === 'FAILED' ? [['message' => 'Image is too large']] : []]]]]]],
                 default => ['data' => []],
             });
         },
@@ -155,6 +155,33 @@ it('links an uploaded image to the product in Shopify', function () {
             'id' => 'gid://shopify/MediaImage/556',
             'referencesToAdd' => ['gid://shopify/Product/77'],
         ]);
+});
+
+it('does not link the image or report success when Shopify fails to add it to the product', function () {
+    fakeShopifyFileUpload([
+        '__typename' => 'MediaImage',
+        'id' => 'gid://shopify/MediaImage/557',
+        'fileStatus' => 'READY',
+        'image' => ['url' => 'https://cdn.shopify.com/s/files/cap.png', 'width' => 10, 'height' => 10],
+    ], mediaStatus: 'FAILED');
+
+    $product = Product::query()->create([
+        'store_id' => $this->store->id, 'title' => 'Cap', 'slug' => 'cap', 'handle' => 'cap',
+        'shopify_product_id' => 'gid://shopify/Product/78',
+    ]);
+
+    $this->actingAs($this->owner)
+        ->post('/api/admin/files/upload-to-shopify', [
+            'file' => fakePng('cap.png'),
+            'owner_type' => 'product',
+            'owner_id' => $product->id,
+            'role' => 'product_image',
+        ], ['Accept' => 'application/json'])
+        ->assertUnprocessable()
+        ->assertJsonPath('errors.shopify.0', 'Shopify could not add this image to the product: Image is too large');
+
+    expect(File::query()->sole()->fileable_id)->toBeNull()
+        ->and($product->fresh()->featured_image['url'] ?? null)->toBeNull();
 });
 
 it('returns a readable error when Shopify cannot process the file', function () {

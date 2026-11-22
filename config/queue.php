@@ -39,7 +39,9 @@ return [
             'connection' => env('DB_QUEUE_CONNECTION'),
             'table' => env('DB_QUEUE_TABLE', 'jobs'),
             'queue' => env('DB_QUEUE', 'default'),
-            'retry_after' => (int) env('DB_QUEUE_RETRY_AFTER', 90),
+            // Must exceed the longest job $timeout (SyncOrderFinancialsJob: 1200s), or a still-running
+            // sync is handed to a second worker and runs twice at once.
+            'retry_after' => (int) env('DB_QUEUE_RETRY_AFTER', 1260),
             'after_commit' => false,
         ],
 

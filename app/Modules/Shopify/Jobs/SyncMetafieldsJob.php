@@ -15,6 +15,9 @@ class SyncMetafieldsJob implements ShouldQueue
 {
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
+    public int $tries = 3;
+    public array $backoff = [30, 120, 300]; // wait before retrying so a Shopify rate limit can clear
+
     public function __construct(
         public readonly string $storeId,
         public readonly int $productId,
